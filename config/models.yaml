@@ -1,0 +1,19 @@
+# 模型库配置
+models:
+  - id: "reasoner"
+    provider: "local"          # ollama
+    name: "deepseek-r1:14b"
+    description: "逻辑推理、架构设计、复杂问题分析"
+    default: true              # 默认主模型
+
+  - id: "coder"
+    provider: "remote"         # siliconflow / openai
+    name: "deepseek-chat" # 或者 codegeex
+    base_url: "https://api.deepseek.com"
+    api_key: "sk-316ca64a18d448b8a2c8c3b7c5938998"
+    description: "高效率代码生成、文件写入、语法修复"
+
+  - id: "fast_checker"
+    provider: "local"
+    name: "llama3.1:8b"
+    description: "快速文本总结、简单的格式检查"

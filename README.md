@@ -2,10 +2,18 @@
 
 一个基于 LangChain 和 LangGraph 构建的智能 Agent 系统，支持模块化技能扩展和多种大模型后端。
 
+# 待改进点
+
+- 给自学习机制提供代码沙箱，为logic提供测试能力，实现测试驱动开发（待完成）
+- 接入标准 MCP 生态 （待完成）
+- 记忆的向量化 (Vectorized Context) （待完成）
+- 添加多模型路由 (Model Router)（已完成）
+
 ## ✨ 特性
 
 - 🧩 **模块化技能系统** - 支持动态加载和扩展技能
 - 🔄 **多模型支持** - 支持 Ollama 本地模型和 OpenAI 兼容 API
+- 🎯 **多模型路由** - 智能选择最适合的模型处理不同任务
 - 📊 **丰富的内置技能** - 包含天气查询、系统监控、Excel 处理、网页搜索等
 - 📝 **按需文档加载** - 智能加载技能文档，节省系统资源
 - 🌐 **网络能力** - 支持网页搜索和浏览器自动化
@@ -164,3 +172,4 @@ MIT License
 - [LangGraph](https://github.com/langchain-ai/langgraph)
 - [Ollama](https://ollama.com/)
 - [Open-Meteo](https://open-meteo.com/)
+
