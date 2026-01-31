@@ -39,7 +39,7 @@ Agents/
 1. **克隆项目**
 ```bash
 git clone <repository-url>
-cd Agents
+cd MicrAgent
 ```
 
 2. **创建虚拟环境**（推荐）
