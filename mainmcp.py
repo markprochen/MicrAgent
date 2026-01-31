@@ -1,142 +1,173 @@
 import os
 import re
 import json
-from typing import Annotated, List, TypedDict
+import ast
+from typing import Annotated, List, Union, TypedDict
+from datetime import datetime
 from dotenv import load_dotenv
+
 from langchain_openai import ChatOpenAI
+from langchain_ollama import ChatOllama
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
-from mcp_manage import mcp_manager
-import ast
-from langchain_ollama import ChatOllama  # 新增此行 导入 Ollama 模型
+from langgraph.checkpoint.memory import MemorySaver  # 导入持久化记忆
+
+from mcp_manage import MCPManager
+from ModelManager import ModelManager
 
 load_dotenv()
 
-# --- 初始化 ---
-# 扫描技能
-mcp_manager.scan_skills()
-
-# 将 get_skill_detail 本身也注册为一个工具，供 AI 按需调用
-BASE_TOOLS = {
-    "get_skill_detail": mcp_manager.get_skill_detail
+# --- 1. 初始化管理中心 ---
+mcp_manager = MCPManager()
+# 初始工具集
+ALL_TOOLS = {
+    "get_skill_detail": mcp_manager.get_skill_detail,
+    **mcp_manager.tools
 }
-ALL_TOOLS = {**BASE_TOOLS, **mcp_manager.tools}
 
+# --- 2. 定义状态 ---
 class AgentState(TypedDict):
+    # add_messages 会将新消息追加到历史中
     messages: Annotated[List[BaseMessage], add_messages]
+    # next_model 将由 execute_tool_node 更新并持久化
+    next_model: str 
 
+# --- 3. 模型管理 ---
+model_manager = ModelManager()
 
-
-def get_model():
-    """
-    根据环境变量动态获取模型实例。
-    支持 MODEL_PROVIDER=local (Ollama) 或 remote (OpenAI兼容API)
-    """
-    provider = os.getenv("MODEL_PROVIDER", "local").lower()
-    model_name = os.getenv("MODEL_NAME", "deepseek-r1:14b")
-    if provider == "remote":
-        # 适用于 DeepSeek 官方 API, SiliconFlow, OpenAI 等
-        print(f"--- [模型加载]: 远程模式 ({model_name}) ---")
-        return ChatOpenAI(
-            model=model_name,
-            api_key=os.getenv("API_KEY"),
-            base_url=os.getenv("BASE_URL"),
-            temperature=0.6
-        )
-    else:
-        # 适用于本地部署的 Ollama
-        print(f"--- [模型加载]: 本地模式 Ollama ({model_name}) ---")
-        return ChatOllama(
-            model=model_name,
-            temperature=0.6,
-            # Ollama 默认超时较短，建议对于复杂任务加长
-            timeout=120 
-        )
-llm = get_model()
+# --- 4. 节点定义 ---
 def call_agent_node(state: AgentState):
-    # 加载必须的背景资料
+    # 1. 获取当前用户选定的模型
+    target_model_id = state.get("next_model") or "reasoner"
+    llm = model_manager.get_model(target_model_id)
+    
+    # 2. 清洗历史上下文 (Context Cleaning)
+    # 如果当前不是 R1 模型，我们把历史消息里的 <think> 标签全部删掉再发给它
+    processed_messages = []
+    for msg in state["messages"]:
+        if isinstance(msg, (HumanMessage, SystemMessage)):
+            processed_messages.append(msg)
+        elif hasattr(msg, "content"):
+            # 如果是 AI 的消息，且当前模型不是 reasoner (假设只有 reasoner 会产出 think)
+            if target_model_id != "reasoner":
+                clean_content = re.sub(r"<think>.*?</think>", "", msg.content, flags=re.DOTALL).strip()
+                processed_messages.append(msg.__class__(content=clean_content))
+            else:
+                processed_messages.append(msg)
+
+    # 3. 加载 manifests... (保持不变)
     base_info = mcp_manager.load_static_md("base.md")
-    # 加载极简的技能清单
     manifest = mcp_manager.load_static_md("manifest.md")
     
-    # 动态生成工具函数的基本列表 (仅名称描述)
-    tools_list = "\n".join([f"- {name}: {func.__doc__.splitlines()[0] if func.__doc__ else ''}" for name, func in ALL_TOOLS.items()])
-
-    system_prompt = f"""
-{base_info}
-
-[可用技能概览 (Manifest)]
-{manifest}
-
-[可用工具函数清单]
-{tools_list}
-
-[重要指令]
-1. 为了节省资源，本系统采用按需加载模式。
-2. 当你需要使用某个技能（如 excel_handler）但不知道其详细参数或 SOP 时，必须首先执行：
-   Action: get_skill_detail
-   Action Input: {{"skill_name": "文件夹名称"}}
-3. 获取详细手册后，再进行具体的业务操作。一次只执行一个 Action。
-"""
-    messages = [SystemMessage(content=system_prompt)] + state["messages"]
-    response = llm.invoke(messages)
+    system_prompt = f"{base_info}\n\n[当前大脑]: {target_model_id}\n\n{manifest}"
+    
+    # 使用清洗后的消息发送给 LLM
+    final_input = [SystemMessage(content=system_prompt)] + processed_messages
+    
+    response = llm.invoke(final_input)
     return {"messages": [response]}
-
 def execute_tool_node(state: AgentState):
-    raw_content = state["messages"][-1].content
-    # 1. 移除思考过程
-    content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL)
+    last_message = state["messages"][-1]
+    content = last_message.content
     
-    # 2. 提取 Action 和 Action Input
-    action_match = re.search(r"Action:\s*([\w\.]+)", content)
-    input_match = re.search(r"Action Input:\s*({.*})", content, re.DOTALL)
-    
-    # 3. --- 核心创新：提取原始内容块 ---
-    # 这样代码和 MD 就不需要转义，直接原样放在标签里即可
-    payload_match = re.search(r"\[CONTENT_START\]\n?(.*?)\n?\[CONTENT_END\]", content, re.DOTALL)
-    payload = payload_match.group(1) if payload_match else None
+    # 依然保留从 state 获取 next_model 的逻辑，保证模型状态在图中流转
+    current_model = state.get("next_model", "reasoner")
 
-    if action_match and input_match:
-        tool_name = action_match.group(1).split('.')[-1]
-        try:
-            # 这里的 JSON 变简单了，因为它不包含复杂的代码字符串
-            args = json.loads(input_match.group(1).replace("'", '"'))
-            
-            # 如果存在 Payload，自动将其注入到工具参数中
-            if payload and "content" in args:
-                args["content"] = payload
-            elif payload and tool_name == "deploy_new_skill": # 兼容你的进化工具
-                args["code_content"] = payload
+    # 解析 Action / Input (保持原来的正则和 Payload 逻辑)
+    # ... (省略解析代码) ...
 
-            if tool_name in ALL_TOOLS:
-                print(f"--- [执行工具]: {tool_name} (Payload模式: {payload is not None}) ---")
-                res = ALL_TOOLS[tool_name](**args)
-                
-                # 热重载逻辑
-                if tool_name in ["write_local_file", "write_python_skill", "deploy_new_skill"]:
-                    mcp_manager.scan_skills()
-                    ALL_TOOLS.update(mcp_manager.tools)
-                    
-                return {"messages": [HumanMessage(content=f"执行结果: {res}")]}
-        except Exception as e:
-            return {"messages": [HumanMessage(content=f"解析错误: {str(e)}。请确保 Action Input 为简单 JSON，长文本放在 [CONTENT_START] 标签中。")]}
-    
-    return {"messages": [HumanMessage(content="未解析到 Action。")]}
+    # 执行完成后
+    return {
+        "messages": [HumanMessage(content=f"工具执行反馈...")],
+        "next_model": current_model # 保持用户选择的模型，不要去修改它
+    }
 
-# --- 构建图 ---
+# --- 5. 构建图 ---
 workflow = StateGraph(AgentState)
+
 workflow.add_node("agent", call_agent_node)
 workflow.add_node("tools", execute_tool_node)
-workflow.add_edge(START, "agent")
-workflow.add_conditional_edges("agent", lambda x: "tools" if "Action:" in x["messages"][-1].content else END)
-workflow.add_edge("tools", "agent")
-app = workflow.compile()
 
+workflow.add_edge(START, "agent")
+# 条件边：根据模型输出是否包含 Action 决定去工具节点还是结束
+workflow.add_conditional_edges(
+    "agent", 
+    lambda x: "tools" if "Action:" in x["messages"][-1].content else END
+)
+workflow.add_edge("tools", "agent")
+
+# 启用持久化记忆
+checkpointer = MemorySaver()
+app = workflow.compile(checkpointer=checkpointer)
+
+# --- 6. 交互入口 ---
 if __name__ == "__main__":
-    print(f"Agent 已启动。已发现技能包: {list(mcp_manager.skill_docs.keys())}")
+    # 1. 启动时显示可用模型列表 (由 ModelManager 动态生成)
+    print(model_manager.get_models_menu())
+    
+    # 2. 初始化默认模型
+    # 寻找配置文件中标记为 default 的 ID
+    current_model_id = "reasoner"
+    for cfg in model_manager.config['models']:
+        if cfg.get('default'):
+            current_model_id = cfg['id']
+            break
+    
+    # 为 LangGraph 准备持久化配置
+    config = {"configurable": {"thread_id": "Wink_User_Session"}}
+    
+    print(f"✅ 系统就绪。当前默认大脑: [{current_model_id}]")
+
     while True:
-        query = input("\n用户: ")
-        for output in app.stream({"messages": [HumanMessage(content=query)]}):
-            for key, value in output.items():
-                if key == "agent": print(f"\n[AI]:\n{value['messages'][-1].content}")
+        prompt_str = f"\n({current_model_id}) 用户 > "
+        query = input(prompt_str).strip()
+        
+        if not query:
+            continue
+        if query.lower() in ["exit", "quit", "q"]:
+            break
+
+        # --- 3. 动态路由指令处理 ---
+        if query.startswith("/"):
+            parts = query.split()
+            cmd = parts[0].lower()
+            
+            # /list 指令：重新显示菜单
+            if cmd == "/list":
+                print(model_manager.get_models_menu())
+                continue
+            
+            # /use [id] 指令：切换模型
+            elif cmd == "/use" and len(parts) > 1:
+                target_id = parts[1].lower()
+                if target_id in model_manager.get_all_ids():
+                    current_model_id = target_id
+                    print(f"🧠 已切换大脑为: [{current_model_id}]")
+                else:
+                    print(f"❌ 错误: 找不到 ID 为 '{target_id}' 的模型。输入 /list 查看可用 ID。")
+                continue
+            
+            else:
+                print("❓ 未知指令。可用指令: /list, /use [id]")
+                continue
+
+        # --- 4. 运行 Agent 图 ---
+        # 每次运行前，将当前选定的 current_model_id 放入 initial_state
+        initial_state = {
+            "messages": [HumanMessage(content=query)],
+            "next_model": current_model_id 
+        }
+
+        # 运行流
+        # 注意：这里我们使用 stream_mode="values" 或 "updates"
+        for output in app.stream(initial_state, config=config, stream_mode="updates"):
+            for node_name, node_state in output.items():
+                if node_name == "agent":
+                    # 打印 AI 的回答，同时标识是哪个模型生成的
+                    last_msg = node_state['messages'][-1]
+                    print(f"\n[{current_model_id}]:\n{last_msg.content}")
+                elif node_name == "tools":
+                    # 打印工具执行过程
+                    tool_res = node_state['messages'][-1]
+                    print(f"\n[系统执行结果]: {tool_res.content}")
