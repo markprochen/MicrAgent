@@ -4,10 +4,10 @@
 
 # 待改进点
 
-- 给自学习机制提供代码沙箱，为logic提供测试能力，实现测试驱动开发
-- 添加多模型路由 (Model Router)
-- 接入标准 MCP 生态
-- 记忆的向量化 (Vectorized Context)
+- 给自学习机制提供代码沙箱，为logic提供测试能力，实现测试驱动开发（待完成）
+- 添加多模型路由 (Model Router)（待完成）
+- 接入标准 MCP 生态 （待完成）
+- 记忆的向量化 (Vectorized Context) （待完成）
 
 ## ✨ 特性
 
