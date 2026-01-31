@@ -1,0 +1,30 @@
+# Python 3.12.10 项目依赖
+# 自动生成于 2024年
+
+# 环境管理
+python-dotenv>=1.0.0
+
+# LangChain 相关依赖
+langchain-openai>=0.1.0
+langchain-ollama>=0.1.0
+langchain-core>=0.1.0
+
+# LangGraph 工作流
+langgraph>=0.0.0
+
+# 网页搜索和浏览器自动化
+duckduckgo-search>=4.1.0
+playwright>=1.40.0
+
+# 数据处理
+pandas>=2.0.0
+openpyxl>=3.0.0
+
+# 系统监控
+psutil>=5.9.0
+
+# HTTP 请求
+requests>=2.31.0
+
+# 注意：playwright 需要安装浏览器驱动
+# 运行 playwright install 来安装浏览器
